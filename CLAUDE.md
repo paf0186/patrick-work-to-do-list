@@ -6,9 +6,11 @@ This repository is Patrick's personal rolling task list, managed via Claude Code
 
 ## Setup
 
-A lightweight `bd` wrapper script is bundled at `bin/bd`. It operates directly on `.beads/issues.jsonl` with no database dependencies. All `bd` commands below should be run as `./bin/bd` from the repo root. No external installation is required.
+A lightweight `bd` wrapper script is bundled at `bin/bd`. If the full `bd` binary is present at `bin/bd-real` or installed system-wide, the wrapper delegates to it automatically. Otherwise it falls back to direct JSONL manipulation (no database required).
 
-If the full `bd` binary is installed on the system (e.g., via `brew install beads`), you can use that instead for the complete feature set.
+To install the full binary (with Dolt backend): `./bin/install-bd.sh`
+
+All `bd` commands below should be run as `./bin/bd` from the repo root.
 
 ## Dictation Notice
 

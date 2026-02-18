@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
 #
 # Lightweight bd (beads) wrapper for managing tasks via JSONL.
-# This script provides the essential bd commands by directly
-# manipulating .beads/issues.jsonl. No database required.
+# If a full bd binary exists at bin/bd-real or is installed system-wide,
+# delegates to it. Otherwise provides essential commands by directly
+# manipulating .beads/issues.jsonl.
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ISSUES_FILE="$REPO_ROOT/.beads/issues.jsonl"
-CONFIG_FILE="$REPO_ROOT/.beads/config.yaml"
 
-# Default values
+# Check for real bd binary (local then system)
+if [[ -x "$SCRIPT_DIR/bd-real" ]]; then
+    exec "$SCRIPT_DIR/bd-real" "$@"
+elif command -v bd &>/dev/null; then
+    exec bd "$@"
+fi
+
+# ---------- JSONL fallback mode ----------
+
 DEFAULT_OWNER="farr0186@gmail.com"
 DEFAULT_CREATOR="Patrick Farrell"
 DEFAULT_PRIORITY=2
 DEFAULT_TYPE="task"
-
-# Get repo prefix from directory name
 REPO_PREFIX="$(basename "$REPO_ROOT")"
 
-# Generate a random 3-char alphanumeric ID suffix
 generate_id() {
     local chars="abcdefghijklmnopqrstuvwxyz0123456789"
     local id=""
     for i in 1 2 3; do
         id+="${chars:$((RANDOM % ${#chars})):1}"
     done
-    # Ensure uniqueness
     while grep -q "\"id\":\"${REPO_PREFIX}-${id}\"" "$ISSUES_FILE" 2>/dev/null; do
         id=""
         for i in 1 2 3; do
@@ -37,12 +41,8 @@ generate_id() {
     echo "${REPO_PREFIX}-${id}"
 }
 
-# Get current timestamp in ISO 8601 format
-timestamp() {
-    date -u +"%Y-%m-%dT%H:%M:%SZ"
-}
+timestamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
-# Escape a string for JSON
 json_escape() {
     local s="$1"
     s="${s//\\/\\\\}"
@@ -53,12 +53,7 @@ json_escape() {
 }
 
 cmd_create() {
-    local title=""
-    local issue_type="$DEFAULT_TYPE"
-    local priority="$DEFAULT_PRIORITY"
-    local description=""
-    local json_output=false
-
+    local title="" issue_type="$DEFAULT_TYPE" priority="$DEFAULT_PRIORITY" description="" json_output=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -t|--type) issue_type="$2"; shift 2 ;;
@@ -66,91 +61,53 @@ cmd_create() {
             -d|--description) description="$2"; shift 2 ;;
             --json) json_output=true; shift ;;
             -*) echo "Unknown flag: $1" >&2; exit 1 ;;
-            *)
-                if [[ -z "$title" ]]; then
-                    title="$1"
-                fi
-                shift
-                ;;
+            *) [[ -z "$title" ]] && title="$1"; shift ;;
         esac
     done
+    [[ -z "$title" ]] && { echo "Error: title is required" >&2; exit 1; }
 
-    if [[ -z "$title" ]]; then
-        echo "Error: title is required" >&2
-        echo "Usage: bd create \"title\" [-t type] [-p priority] [-d description] [--json]" >&2
-        exit 1
-    fi
-
-    local id
+    local id now escaped_title entry
     id="$(generate_id)"
-    local now
     now="$(timestamp)"
-    local escaped_title
     escaped_title="$(json_escape "$title")"
-
-    local entry="{\"id\":\"$id\",\"title\":\"$escaped_title\",\"status\":\"open\",\"priority\":$priority,\"issue_type\":\"$issue_type\",\"owner\":\"$DEFAULT_OWNER\",\"created_at\":\"$now\",\"created_by\":\"$DEFAULT_CREATOR\",\"updated_at\":\"$now\""
-
+    entry="{\"id\":\"$id\",\"title\":\"$escaped_title\",\"status\":\"open\",\"priority\":$priority,\"issue_type\":\"$issue_type\",\"owner\":\"$DEFAULT_OWNER\",\"created_at\":\"$now\",\"created_by\":\"$DEFAULT_CREATOR\",\"updated_at\":\"$now\""
     if [[ -n "$description" ]]; then
-        local escaped_desc
-        escaped_desc="$(json_escape "$description")"
-        entry+=",\"description\":\"$escaped_desc\""
+        entry+=",\"description\":\"$(json_escape "$description")\""
     fi
-
     entry+="}"
-
     echo "$entry" >> "$ISSUES_FILE"
-
-    if $json_output; then
-        echo "$entry"
-    else
-        echo "Created $issue_type $id: $title"
-    fi
+    if $json_output; then echo "$entry"; else echo "Created $issue_type $id: $title"; fi
 }
 
 cmd_list() {
-    local status_filter=""
-    local json_output=false
-    local show_all=false
-
+    local status_filter="" json_output=false show_all=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -s|--status) status_filter="$2"; shift 2 ;;
             --all) show_all=true; shift ;;
             --json) json_output=true; shift ;;
-            -*) shift ;;  # ignore unknown flags
             *) shift ;;
         esac
     done
-
     if $json_output; then
         if [[ -n "$status_filter" ]]; then
             grep "\"status\":\"$status_filter\"" "$ISSUES_FILE" 2>/dev/null || true
         elif $show_all; then
             cat "$ISSUES_FILE"
         else
-            # Default: show non-closed
             grep -v '"status":"closed"' "$ISSUES_FILE" 2>/dev/null || true
         fi
     else
-        local format_line
         while IFS= read -r line; do
             local id title status priority
             id=$(echo "$line" | sed 's/.*"id":"\([^"]*\)".*/\1/')
             title=$(echo "$line" | sed 's/.*"title":"\([^"]*\)".*/\1/')
             status=$(echo "$line" | sed 's/.*"status":"\([^"]*\)".*/\1/')
             priority=$(echo "$line" | sed 's/.*"priority":\([0-9]*\).*/\1/')
-
             local show=true
-            if [[ -n "$status_filter" && "$status" != "$status_filter" ]]; then
-                show=false
-            fi
-            if ! $show_all && [[ "$status" == "closed" && -z "$status_filter" ]]; then
-                show=false
-            fi
-
-            if $show; then
-                printf "%-30s  P%s  %-12s  %s\n" "$id" "$priority" "[$status]" "$title"
-            fi
+            [[ -n "$status_filter" && "$status" != "$status_filter" ]] && show=false
+            ! $show_all && [[ "$status" == "closed" && -z "$status_filter" ]] && show=false
+            $show && printf "%-30s  P%s  %-12s  %s\n" "$id" "$priority" "[$status]" "$title"
         done < "$ISSUES_FILE"
     fi
 }
@@ -158,7 +115,6 @@ cmd_list() {
 cmd_ready() {
     local json_output=false
     [[ "${1:-}" == "--json" ]] && json_output=true
-
     if $json_output; then
         grep '"status":"open"' "$ISSUES_FILE" 2>/dev/null || true
     else
@@ -167,92 +123,51 @@ cmd_ready() {
 }
 
 cmd_show() {
-    local id="$1"
-    shift
+    local id="$1"; shift
     local json_output=false
     [[ "${1:-}" == "--json" ]] && json_output=true
-
     local line
     line=$(grep "\"id\":\"$id\"" "$ISSUES_FILE" 2>/dev/null || true)
-
-    if [[ -z "$line" ]]; then
-        echo "Error: issue $id not found" >&2
-        exit 1
-    fi
-
-    if $json_output; then
-        echo "$line"
-    else
-        echo "$line" | python3 -m json.tool 2>/dev/null || echo "$line"
-    fi
+    [[ -z "$line" ]] && { echo "Error: issue $id not found" >&2; exit 1; }
+    if $json_output; then echo "$line"; else echo "$line" | python3 -m json.tool 2>/dev/null || echo "$line"; fi
 }
 
 cmd_update() {
-    local id="$1"
-    shift
-
-    local new_status=""
-    local new_priority=""
-
+    local id="$1"; shift
+    local new_status="" new_priority=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --status) new_status="$2"; shift 2 ;;
             --priority) new_priority="$2"; shift 2 ;;
-            --json) shift ;;
             *) shift ;;
         esac
     done
-
-    if ! grep -q "\"id\":\"$id\"" "$ISSUES_FILE" 2>/dev/null; then
-        echo "Error: issue $id not found" >&2
-        exit 1
-    fi
-
-    local now
+    grep -q "\"id\":\"$id\"" "$ISSUES_FILE" 2>/dev/null || { echo "Error: issue $id not found" >&2; exit 1; }
+    local now tmpfile
     now="$(timestamp)"
-    local tmpfile
     tmpfile="$(mktemp)"
-
     while IFS= read -r line; do
         if echo "$line" | grep -q "\"id\":\"$id\""; then
-            if [[ -n "$new_status" ]]; then
-                line=$(echo "$line" | sed "s/\"status\":\"[^\"]*\"/\"status\":\"$new_status\"/")
-            fi
-            if [[ -n "$new_priority" ]]; then
-                line=$(echo "$line" | sed "s/\"priority\":[0-9]*/\"priority\":$new_priority/")
-            fi
+            [[ -n "$new_status" ]] && line=$(echo "$line" | sed "s/\"status\":\"[^\"]*\"/\"status\":\"$new_status\"/")
+            [[ -n "$new_priority" ]] && line=$(echo "$line" | sed "s/\"priority\":[0-9]*/\"priority\":$new_priority/")
             line=$(echo "$line" | sed "s/\"updated_at\":\"[^\"]*\"/\"updated_at\":\"$now\"/")
         fi
         echo "$line"
     done < "$ISSUES_FILE" > "$tmpfile"
-
     mv "$tmpfile" "$ISSUES_FILE"
     echo "Updated $id"
 }
 
 cmd_close() {
-    local id="$1"
-    shift
-
+    local id="$1"; shift
     local reason=""
     while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --reason|-r) reason="$2"; shift 2 ;;
-            --json) shift ;;
-            *) shift ;;
-        esac
+        case "$1" in --reason|-r) reason="$2"; shift 2 ;; *) shift ;; esac
     done
-
-    if ! grep -q "\"id\":\"$id\"" "$ISSUES_FILE" 2>/dev/null; then
-        echo "Error: issue $id not found" >&2
-        exit 1
-    fi
-
-    local now
+    grep -q "\"id\":\"$id\"" "$ISSUES_FILE" 2>/dev/null || { echo "Error: issue $id not found" >&2; exit 1; }
+    local now tmpfile
     now="$(timestamp)"
-    local tmpfile
     tmpfile="$(mktemp)"
-
     while IFS= read -r line; do
         if echo "$line" | grep -q "\"id\":\"$id\""; then
             line=$(echo "$line" | sed "s/\"status\":\"[^\"]*\"/\"status\":\"closed\"/")
@@ -260,22 +175,16 @@ cmd_close() {
         fi
         echo "$line"
     done < "$ISSUES_FILE" > "$tmpfile"
-
     mv "$tmpfile" "$ISSUES_FILE"
     echo "Closed $id${reason:+ ($reason)}"
 }
 
-cmd_sync() {
-    echo "JSONL mode: no database to sync. Use git to commit and push."
-}
-
-cmd_version() {
-    echo "bd (JSONL wrapper) v1.0.0"
-}
-
+cmd_sync() { echo "JSONL mode: no database to sync. Use git to commit and push."; }
+cmd_version() { echo "bd (JSONL wrapper) v1.0.0"; }
 cmd_help() {
     cat <<'HELP'
-bd - lightweight beads task manager (JSONL mode)
+bd - lightweight beads task manager (JSONL fallback mode)
+No full bd binary found. Install with: ./bin/install-bd.sh
 
 Commands:
   create "title" [-t type] [-p priority] [-d desc] [--json]
@@ -284,21 +193,12 @@ Commands:
   show <id> [--json]
   update <id> [--status <status>] [--priority <0-4>]
   close <id> [--reason "reason"]
-  sync
-  version
-  help
+  sync | version | help
 HELP
 }
 
-# Main dispatch
-if [[ $# -eq 0 ]]; then
-    cmd_help
-    exit 0
-fi
-
-command="$1"
-shift
-
+[[ $# -eq 0 ]] && { cmd_help; exit 0; }
+command="$1"; shift
 case "$command" in
     create)  cmd_create "$@" ;;
     list)    cmd_list "$@" ;;
@@ -309,9 +209,5 @@ case "$command" in
     sync)    cmd_sync "$@" ;;
     version) cmd_version ;;
     help|--help|-h) cmd_help ;;
-    *)
-        echo "Unknown command: $command" >&2
-        cmd_help
-        exit 1
-        ;;
+    *) echo "Unknown command: $command" >&2; cmd_help; exit 1 ;;
 esac
